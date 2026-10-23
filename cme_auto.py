@@ -176,7 +176,7 @@ def run(c):
                 continue
             s = implied(tgt, F, K, T, legs)
             sd = F * s * math.sqrt(T)
-            exps.append(dict(exp=exp, und=und, F=F, T=T, vol=s, sd=sd, code=g.raw_symbol.iloc[0][:5]))
+            exps.append(dict(exp=exp, und=und, F=F, ty=T, vol=s, sd=sd, code=g.raw_symbol.iloc[0][:5]))
         if not exps:
             say(f"\n{name}: no settlement prices yet"); continue
         ex = pd.DataFrame(exps).sort_values("exp")
@@ -192,21 +192,26 @@ def run(c):
                 e = vmap.get((r.expiration, r.underlying))
                 if e is None or r.oi <= 0:
                     continue
-                k = gamma(e.F, r.strike_price, e.vol, e.T) * p["mult"] * e.F * e.F * 0.01
+                k = gamma(e.F, r.strike_price, e.vol, e.ty) * p["mult"] * e.F * e.F * 0.01
                 rows.append((r.strike_price, r.oi * k if r.instrument_class == "C" else 0.0, -r.oi * k if r.instrument_class == "P" else 0.0))
             if not rows:
                 return None, [], lambda S: 0.0
             g = pd.DataFrame(rows, columns=["strike", "c", "p"]).groupby("strike").sum()
             g["net"] = g.c + g.p
+            K, W, FE, VO, TY = [], [], [], [], []
+            for r in oo.itertuples():
+                e = vmap.get((r.expiration, r.underlying))
+                if e is None or r.oi <= 0:
+                    continue
+                K.append(r.strike_price); W.append(r.oi if r.instrument_class == "C" else -r.oi)
+                FE.append(e.F); VO.append(e.vol); TY.append(e.ty)
+            K, W, FE, VO, TY = map(np.array, (K, W, FE, VO, TY))
             def tot(S):
-                t = 0.0
-                for r in oo.itertuples():
-                    e = vmap.get((r.expiration, r.underlying))
-                    if e is None or r.oi <= 0:
-                        continue
-                    Se = S + (e.F - F0)
-                    t += (r.oi if r.instrument_class == "C" else -r.oi) * gamma(Se, r.strike_price, e.vol, e.T) * p["mult"] * Se * Se * 0.01
-                return t
+                Se = S + (FE - F0)
+                sq = VO * np.sqrt(TY)
+                d1 = (np.log(Se / K) + 0.5 * sq * sq) / sq
+                gm = np.exp(-0.5 * d1 * d1) / np.sqrt(2 * np.pi) / (Se * sq)
+                return float(np.sum(W * gm * p["mult"] * Se * Se * 0.01))
             xs = np.linspace(F0 * 0.97, F0 * 1.03, 241)
             ys = [tot(x) for x in xs]
             fl = [xs[i] - ys[i] * (xs[i + 1] - xs[i]) / (ys[i + 1] - ys[i]) for i in range(len(xs) - 1) if np.sign(ys[i]) != np.sign(ys[i + 1])]
@@ -232,7 +237,7 @@ def run(c):
             f"VOLD {front.vol*100:.2f}", f"VOLW {weekly.vol*100:.2f}"] if x)
         say(f"\n— {name} (futures {front.und} {F0:.{d}f}, basis {basis:+.{d}f} from {bsrc})")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
-        say(f"Daily 1SD ±{front.sd / math.sqrt(max(front.T * 252, 1)):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
+        say(f"Daily 1SD ±{front.sd / math.sqrt(max(front.ty * 252, 1)):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
         say(f"Weekly vol {weekly.vol*100:.2f}% (expiry {weekly.exp:%a %d %b})")
         say("PASTE:\n" + paste)
         if gw is not None:
