@@ -34,12 +34,23 @@ def data_end(c):
     r = c.metadata.get_dataset_range(dataset=DATASET)
     return pd.Timestamp(r.get("end") or r.get("end_date"))
 
+def fetch(c, **kw):
+    import time
+    for i in range(4):
+        try:
+            return c.timeseries.get_range(dataset=DATASET, **kw).to_df()
+        except Exception as e:
+            if i == 3 or not isinstance(e, db.BentoServerError):
+                raise
+            print(f"retry {i+1} after: {e}")
+            time.sleep(20 * (i + 1))
+
 def guarded(c, label, **kw):
     cost = c.metadata.get_cost(dataset=DATASET, **kw)
     print(f"[cost] {label}: ${cost:.4f}")
     if cost > MAX_COST:
         sys.exit(f"Stopped: {label} would cost ${cost:.2f} (> MAX_COST ${MAX_COST}). Raise MAX_COST if you're sure.")
-    return c.timeseries.get_range(dataset=DATASET, **kw).to_df()
+    return fetch(c, **kw)
 
 # ───────── Discover: which option product codes belong to 6E / NQ / GC ─────────
 def discover(c):
@@ -106,17 +117,31 @@ def spot_basis(name, fut_last):
 def run(c):
     prods = json.load(open("products.json"))
     end = data_end(c)
-    start = end - pd.Timedelta(days=3)
+    now = pd.Timestamp.now(tz="UTC")
+    day0 = end.normalize()                       # definitions snapshot = UTC midnight
+    if end - day0 < pd.Timedelta(hours=2):
+        day0 -= pd.Timedelta(days=1)
     parents = [f"{a}.OPT" for v in prods.values() for a in v] + [f"{p['root']}.FUT" for p in PRODUCTS.values()]
-    kw = dict(symbols=parents, stype_in="parent", start=start, end=end)
-    defs = guarded(c, "definitions", schema="definition", **kw)
-    stats = guarded(c, "statistics", schema="statistics", **kw)
+    defs = guarded(c, "definitions", schema="definition", symbols=parents, stype_in="parent", start=day0, end=end)
     defs = defs.sort_index().groupby("instrument_id").last()
-    stats = stats.sort_index()
+    # only what we use: options expiring inside the window + their futures → much smaller stats pull
+    exp_ = pd.to_datetime(defs["expiration"], utc=True)
+    keep = defs[(defs["instrument_class"] == "F") | (defs["instrument_class"].isin(["C", "P"]) & (exp_ > now) & (exp_ < now + pd.Timedelta(days=GEX_DAYS)))]
+    ids = [int(i) for i in keep.index]
+    print(f"{len(ids)} instruments to price")
+    parts, total = [], 0.0
+    sstart = day0 - pd.Timedelta(days=3)         # covers the last OI publication (weekends too)
+    for i in range(0, len(ids), 1500):
+        kw = dict(schema="statistics", symbols=ids[i:i + 1500], stype_in="instrument_id", start=sstart, end=end)
+        total += c.metadata.get_cost(dataset=DATASET, **kw)
+        if total > MAX_COST:
+            sys.exit(f"Stopped: statistics would cost ${total:.2f} (> MAX_COST ${MAX_COST}).")
+        parts.append(fetch(c, **kw))
+    print(f"[cost] statistics: ${total:.4f}")
+    stats = pd.concat(parts).sort_index()
     oi = stats[stats.stat_type == 9].groupby("instrument_id").last()
     st = stats[stats.stat_type == 3].groupby("instrument_id").last()
     oi_date = pd.to_datetime(oi["ts_ref"]).max() if len(oi) else None
-    now = pd.Timestamp.now(tz="UTC")
     say(f"CME levels · {now:%a %d %b %H:%M} UTC · OI as of {oi_date:%a %d %b} (CME official)" if oi_date is not None else "CME levels · no OI found")
 
     defs["oi"] = oi["quantity"].reindex(defs.index)
@@ -228,6 +253,12 @@ if __name__ == "__main__":
     ap.add_argument("--discover", action="store_true")
     a = ap.parse_args()
     c = client()
-    discover(c) if a.discover else run(c)
+    try:
+        discover(c) if a.discover else run(c)
+    except SystemExit as e:
+        say(f"CME levels stopped: {e}"); open("levels.txt", "w").write("\n".join(OUT)); telegram(); raise
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        say(f"CME levels FAILED: {type(e).__name__}: {str(e)[:300]}"); open("levels.txt", "w").write("\n".join(OUT)); telegram(); raise
     open("levels.txt", "w").write("\n".join(OUT))
     telegram()
