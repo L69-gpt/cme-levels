@@ -116,6 +116,10 @@ def spot_basis(name, fut_last):
 # ───────── Daily run ─────────
 def run(c):
     prods = json.load(open("products.json"))
+    try:
+        state = json.load(open("state.json"))
+    except Exception:
+        state = {}
     end = data_end(c)
     now = pd.Timestamp.now(tz="UTC")
     day0 = end.normalize()                       # definitions snapshot = UTC midnight
@@ -146,6 +150,7 @@ def run(c):
 
     defs["oi"] = oi["quantity"].reindex(defs.index)
     defs["settle"] = st["price"].reindex(defs.index)
+    defs["sdate"] = pd.to_datetime(st["ts_ref"], utc=True).reindex(defs.index)
     fut = defs[defs["instrument_class"] == "F"].set_index("raw_symbol")
 
     for name, p in PRODUCTS.items():
@@ -183,6 +188,17 @@ def run(c):
         front = ex.iloc[0]
         fri = ex[ex.exp.dt.weekday == 4]
         weekly = fri.iloc[0] if len(fri) else front
+        # monthly: expiry closest to the end of this month
+        mend = (now + pd.offsets.MonthEnd(0)).normalize() + pd.Timedelta(hours=21)
+        monthly = ex.iloc[(ex.exp - mend).abs().argsort()].iloc[0]
+        # lock weekly vol for the whole week and monthly vol for the whole month (bands must not move)
+        wk, mk = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}", f"{now:%Y-%m}"
+        stp = state.setdefault(name, {})
+        if stp.get("week") != wk:
+            stp.update(week=wk, volw=round(float(weekly.vol) * 100, 2), wexp=f"{weekly.exp:%a %d %b}")
+        if stp.get("month") != mk:
+            stp.update(month=mk, volm=round(float(monthly.vol) * 100, 2), mexp=f"{monthly.exp:%a %d %b}")
+        volw, volm = stp["volw"], stp["volm"]
         # GEX (all expiries) + this-week-only
         vmap = {(r.exp, r.und): r for r in ex.itertuples()}
         F0 = front.F
@@ -229,17 +245,22 @@ def run(c):
             ("FLIP " + " ".join(f(x) for x in flips)) if flips else "",
             "PUT " + f(g.p.idxmin()), "CALL " + f(g.c.idxmax()),
             "POS " + " ".join(f(x) for x in pos), "NEG " + " ".join(f(x) for x in neg),
-            f"VOLD {front.vol*100:.2f}", f"VOLW {weekly.vol*100:.2f}", f"FUT {tv}"] if x)
-        say(f"\n— {name} (futures {front.und} settle {F0:.{d}f} · levels in futures prices, indicator converts them live)")
+            f"VOLD {front.vol*100:.2f}", f"VOLW {volw:.2f}", f"VOLM {volm:.2f}", f"FUT {tv}"] if x)
+        sd_ = fut.loc[front.und, "sdate"] if front.und in fut.index else None
+        say(f"\n— {name} (futures {front.und} settle {F0:.{d}f}" + (f" from {sd_:%a %d %b}" if sd_ is not None and not pd.isna(sd_) else "") + " · levels in futures prices, indicator converts them live)")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
         say(f"Daily 1SD ±{front.sd / math.sqrt(max(front.ty * 252, 1)):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
-        say(f"Weekly vol {weekly.vol*100:.2f}% (expiry {weekly.exp:%a %d %b})")
+        say(f"Weekly vol {volw:.2f}% (locked {stp['week']}, expiry {stp['wexp']}) · Monthly vol {volm:.2f}% (locked {stp['month']}, expiry {stp['mexp']})")
         say("PASTE:\n" + paste)
         if gw is not None:
             say(f"This week only (to {weekly.exp:%a %d %b}): " + "; ".join(x for x in [
                 ("FLIP " + " ".join(f(x) for x in flw)) if flw else "",
                 "PUT " + f(gw.p.idxmin()), "CALL " + f(gw.c.idxmax()),
                 "POS " + " ".join(f(x) for x in gw.sort_values("net", ascending=False).head(3).index), f"FUT {tv}"] if x))
+    json.dump(state, open("state.json", "w"), indent=1)
+
+def save_state(state):
+    json.dump(state, open("state.json", "w"), indent=1)
 
 def telegram():
     tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
