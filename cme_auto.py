@@ -12,9 +12,9 @@ import databento as db
 
 DATASET = "GLBX.MDP3"
 PRODUCTS = {
-    "EUR":  {"tv": "CME", "root": "6E", "mult": 125000, "spot": ["EURUSD=X"], "dec": 5},
-    "NAS":  {"tv": "CME_MINI", "root": "NQ", "mult": 20,     "spot": ["^NDX"],     "dec": 2},
-    "GOLD": {"tv": "COMEX", "root": "GC", "mult": 100,    "spot": ["XAUUSD=X"], "dec": 2},
+    "EUR":  {"tv": "CME", "settle_utc": "19:00", "root": "6E", "mult": 125000, "spot": ["EURUSD=X"], "dec": 5},
+    "NAS":  {"tv": "CME_MINI", "settle_utc": "20:15", "root": "NQ", "mult": 20,     "spot": ["^NDX"],     "dec": 2},
+    "GOLD": {"tv": "COMEX", "settle_utc": "17:30", "root": "GC", "mult": 100,    "spot": ["XAUUSD=X"], "dec": 2},
 }
 GEX_DAYS = 35           # expiries inside this window count for GEX
 MAX_COST = float(os.environ.get("MAX_COST", "3"))
@@ -167,7 +167,11 @@ def run(c):
             if und not in fut.index or pd.isna(fut.loc[und, "settle"]):
                 continue
             F = float(fut.loc[und, "settle"])
-            T = trading_years(now, exp)
+            # time to expiry measured from WHEN the settlement prices were set (not from now),
+            # otherwise stale settlements make the vol look too high
+            sdt = fut.loc[und, "sdate"]
+            tset = (sdt.normalize() + pd.Timedelta(p["settle_utc"] + ":00")) if not pd.isna(sdt) else now
+            T = trading_years(tset, exp)
             g = g.dropna(subset=["settle"])
             if g.empty:
                 continue
@@ -181,7 +185,7 @@ def run(c):
                 continue
             s = implied(tgt, F, K, T, legs)
             sd = F * s * math.sqrt(T)
-            exps.append(dict(exp=exp, und=und, F=F, ty=T, vol=s, sd=sd, code=g.raw_symbol.iloc[0][:5]))
+            exps.append(dict(exp=exp, und=und, F=F, ty=trading_years(now, exp), vol=s, sd=sd, code=g.raw_symbol.iloc[0][:5]))
         if not exps:
             say(f"\n{name}: no settlement prices yet"); continue
         ex = pd.DataFrame(exps).sort_values("exp")
@@ -249,7 +253,7 @@ def run(c):
         sd_ = fut.loc[front.und, "sdate"] if front.und in fut.index else None
         say(f"\n— {name} (futures {front.und} settle {F0:.{d}f}" + (f" from {sd_:%a %d %b}" if sd_ is not None and not pd.isna(sd_) else "") + " · levels in futures prices, indicator converts them live)")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
-        say(f"Daily 1SD ±{front.sd / math.sqrt(max(front.ty * 252, 1)):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
+        say(f"Daily 1SD ±{F0 * front.vol / math.sqrt(252):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
         say(f"Weekly vol {volw:.2f}% (locked {stp['week']}, expiry {stp['wexp']}) · Monthly vol {volm:.2f}% (locked {stp['month']}, expiry {stp['mexp']})")
         say("PASTE:\n" + paste)
         if gw is not None:
