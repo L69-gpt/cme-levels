@@ -1,0 +1,26 @@
+{
+ "EUR": {
+  "week": "2026-W43",
+  "volw": 7.12,
+  "wexp": "Fri 30 Oct",
+  "month": "2026-10",
+  "volm": 7.12,
+  "mexp": "Fri 30 Oct"
+ },
+ "NAS": {
+  "week": "2026-W43",
+  "volw": 28.08,
+  "wexp": "Fri 30 Oct",
+  "month": "2026-10",
+  "volm": 28.08,
+  "mexp": "Fri 30 Oct"
+ },
+ "GOLD": {
+  "week": "2026-W43",
+  "volw": 20.6,
+  "wexp": "Fri 30 Oct",
+  "month": "2026-10",
+  "volm": 20.6,
+  "mexp": "Fri 30 Oct"
+ }
+}
