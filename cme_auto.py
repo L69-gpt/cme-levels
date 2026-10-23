@@ -6,15 +6,15 @@ Modes:
   python cme_auto.py              → daily run (needs products.json from discover)
 Env: DATABENTO_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAX_COST (USD, default 3), BASIS_EUR/BASIS_NAS/BASIS_GOLD (optional overrides)
 """
-import argparse, json, math, os, sys, datetime as dt
+import argparse, json, math, os, re, sys, datetime as dt
 import numpy as np, pandas as pd
 import databento as db
 
 DATASET = "GLBX.MDP3"
 PRODUCTS = {
-    "EUR":  {"root": "6E", "mult": 125000, "spot": ["EURUSD=X"], "dec": 5},
-    "NAS":  {"root": "NQ", "mult": 20,     "spot": ["^NDX"],     "dec": 2},
-    "GOLD": {"root": "GC", "mult": 100,    "spot": ["XAUUSD=X"], "dec": 2},
+    "EUR":  {"tv": "CME", "root": "6E", "mult": 125000, "spot": ["EURUSD=X"], "dec": 5},
+    "NAS":  {"tv": "CME_MINI", "root": "NQ", "mult": 20,     "spot": ["^NDX"],     "dec": 2},
+    "GOLD": {"tv": "COMEX", "root": "GC", "mult": 100,    "spot": ["XAUUSD=X"], "dec": 2},
 }
 GEX_DAYS = 35           # expiries inside this window count for GEX
 MAX_COST = float(os.environ.get("MAX_COST", "3"))
@@ -218,24 +218,19 @@ def run(c):
             return g, sorted(fl, key=lambda q: abs(q - F0))[:2], tot
         g, flips, tot = gex(o)
         gw, flw, _ = gex(o[o.expiration <= weekly.exp])
-        # map to the spot chart
-        bars = None
-        try:
-            bars = c.timeseries.get_range(dataset=DATASET, schema="ohlcv-1m", symbols=[front.und], start=end - pd.Timedelta(days=3), end=end).to_df()
-        except Exception as e:
-            print("fut last failed:", e)
-        fut_last = float(bars["close"].iloc[-1]) if bars is not None and len(bars) else F0
-        basis, bsrc = spot_basis(name, fut_last)
+        # levels stay in FUTURES prices; the TradingView indicator subtracts the live basis itself
+        m_ = re.match(r"^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)$", str(front.und))
+        tv = f"{p['tv']}:{m_.group(1)}{m_.group(2)}202{m_.group(3)}" if m_ else "AUTO"
         d = p["dec"]
-        f = lambda x: f"{x - basis:.{d}f}"
+        f = lambda x: f"{x:.{d}f}"
         pos = g.sort_values("net", ascending=False).head(3).index
         neg = g.sort_values("net").head(3).index
         paste = "; ".join(x for x in [
             ("FLIP " + " ".join(f(x) for x in flips)) if flips else "",
             "PUT " + f(g.p.idxmin()), "CALL " + f(g.c.idxmax()),
             "POS " + " ".join(f(x) for x in pos), "NEG " + " ".join(f(x) for x in neg),
-            f"VOLD {front.vol*100:.2f}", f"VOLW {weekly.vol*100:.2f}"] if x)
-        say(f"\n— {name} (futures {front.und} {F0:.{d}f}, basis {basis:+.{d}f} from {bsrc})")
+            f"VOLD {front.vol*100:.2f}", f"VOLW {weekly.vol*100:.2f}", f"FUT {tv}"] if x)
+        say(f"\n— {name} (futures {front.und} settle {F0:.{d}f} · levels in futures prices, indicator converts them live)")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
         say(f"Daily 1SD ±{front.sd / math.sqrt(max(front.ty * 252, 1)):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
         say(f"Weekly vol {weekly.vol*100:.2f}% (expiry {weekly.exp:%a %d %b})")
@@ -244,7 +239,7 @@ def run(c):
             say(f"This week only (to {weekly.exp:%a %d %b}): " + "; ".join(x for x in [
                 ("FLIP " + " ".join(f(x) for x in flw)) if flw else "",
                 "PUT " + f(gw.p.idxmin()), "CALL " + f(gw.c.idxmax()),
-                "POS " + " ".join(f(x) for x in gw.sort_values("net", ascending=False).head(3).index)] if x))
+                "POS " + " ".join(f(x) for x in gw.sort_values("net", ascending=False).head(3).index), f"FUT {tv}"] if x))
 
 def telegram():
     tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
