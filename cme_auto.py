@@ -161,6 +161,34 @@ def flows(o, vmap, mult_unused=None):
         cha += w * charm
     return -van, -cha                                  # dealers hedge the opposite way
 
+# ───────── COT (free CFTC data, weekly) ─────────
+COT = {"EUR": ("gpe5-46if", "099741", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds"),
+       "NAS": ("gpe5-46if", "209742", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds"),
+       "GOLD": ("72hh-3qpy", "088691", "m_money_positions_long_all", "m_money_positions_short_all", "Managed money")}
+
+def cot_line(name):
+    try:
+        import requests
+        ds, code, fl, fs, who = COT[name]
+        url = f"https://publicreporting.cftc.gov/resource/{ds}.json"
+        rows = requests.get(url, params={"cftc_contract_market_code": code, "$order": "report_date_as_yyyy_mm_dd DESC", "$limit": 160}, timeout=30).json()
+        if not rows:
+            return None
+        net = [int(float(r[fl])) - int(float(r[fs])) for r in rows]
+        d = pd.Timestamp(rows[0]["report_date_as_yyyy_mm_dd"])
+        ch = net[0] - net[1] if len(net) > 1 else 0
+        def idx(n):
+            w = net[:n]
+            lo, hi = min(w), max(w)
+            return 100 * (net[0] - lo) / (hi - lo) if hi > lo else 50
+        i6, i36 = idx(26), idx(156)
+        ext = " → most bullish positioning in 3y (crowded, reversal risk)" if i36 >= 90 else " → most bearish positioning in 3y (crowded, squeeze risk)" if i36 <= 10 else ""
+        side = "net LONG" if net[0] > 0 else "net SHORT"
+        return f"COT ({d:%d %b}): {who} {side} {abs(net[0]):,} ({ch:+,} w/w) · COT index 6m {i6:.0f} / 3y {i36:.0f}{ext}"
+    except Exception as e:
+        print("cot failed:", e)
+        return None
+
 # ───────── Daily run ─────────
 def run(c):
     prods = json.load(open("products.json"))
@@ -290,6 +318,9 @@ def run(c):
         m_ = re.match(r"^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)$", str(front.und))
         tv = f"{p['tv']}:{m_.group(1)}{m_.group(2)}202{m_.group(3)}" if m_ else "AUTO"
         d = p["dec"]
+        tod = o[(o.expiration > now) & (o.expiration <= now + pd.Timedelta(hours=24)) & (o.oi > 0)]
+        big = tod.groupby("strike_price").oi.sum().sort_values(ascending=False).head(3) if len(tod) else pd.Series(dtype=float)
+        exp_txt = ("EXP " + " ".join(f"{k:.{d}f}" for k in big.index) + f" @{(tod.expiration.min() + pd.Timedelta(hours=4)):%H:%M}") if len(big) else ""
         f = lambda x: f"{x:.{d}f}"
         pos = g.sort_values("net", ascending=False).head(3).index
         neg = g.sort_values("net").head(3).index
@@ -297,7 +328,7 @@ def run(c):
             ("FLIP " + " ".join(f(x) for x in flips)) if flips else "",
             "PUT " + f(g.p.idxmin()), "CALL " + f(g.c.idxmax()),
             "POS " + " ".join(f(x) for x in pos), "NEG " + " ".join(f(x) for x in neg),
-            f"VOLD {front.vol*100:.2f}", f"VOLW {volw:.2f}", f"VOLM {volm:.2f}", f"FUT {tv}"] if x)
+            f"VOLD {front.vol*100:.2f}", f"VOLW {volw:.2f}", f"VOLM {volm:.2f}", exp_txt, f"FUT {tv}"] if x)
         sd_ = fut.loc[front.und, "sdate"] if front.und in fut.index else None
         say(f"\n— {name} (futures {front.und} settle {F0:.{d}f}" + (f" from {sd_:%a %d %b}" if sd_ is not None and not pd.isna(sd_) else "") + " · levels in futures prices, indicator converts them live)")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
@@ -329,6 +360,13 @@ def run(c):
             say(f"Charm: each day into expiry dealers {'BUY' if chm > 0 else 'SELL'} ~{abs(chm):,.0f} contracts{flip_note}")
         except Exception as e_:
             print("flows failed:", e_)
+        # today's CME expiries (next 24h) with the biggest OI → pin candidates into the cut
+        if len(big):
+            ex_t = tod.expiration.min() + pd.Timedelta(hours=4)
+            say(f"Expiring today {ex_t:%H:%M} MU: " + ", ".join(f"{k:.{d}f} fut ({v:,.0f} OI)" for k, v in big.items()) + " → pin candidates into the cut")
+        cl = cot_line(name)
+        if cl:
+            say(cl)
         say("PASTE:\n" + paste)
         if gw is not None:
             say(f"This week only (to {weekly.exp:%a %d %b}): " + "; ".join(x for x in [
