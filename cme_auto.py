@@ -36,14 +36,14 @@ def data_end(c):
 
 def fetch(c, **kw):
     import time
-    for i in range(4):
+    for i in range(5):
         try:
             return c.timeseries.get_range(dataset=DATASET, **kw).to_df()
         except Exception as e:
-            if i == 3 or not isinstance(e, db.BentoServerError):
+            if i == 4 or not isinstance(e, db.BentoServerError):
                 raise
             print(f"retry {i+1} after: {e}")
-            time.sleep(20 * (i + 1))
+            time.sleep(30 * (i + 1))
 
 def guarded(c, label, **kw):
     cost = c.metadata.get_cost(dataset=DATASET, **kw)
@@ -201,18 +201,39 @@ def run(c):
     day0 = end.normalize()                       # definitions snapshot = UTC midnight
     if end - day0 < pd.Timedelta(hours=2):
         day0 -= pd.Timedelta(days=1)
-    parents = [f"{a}.OPT" for v in prods.values() for a in v] + [f"{p['root']}.FUT" for p in PRODUCTS.values()]
-    defs = guarded(c, "definitions", schema="definition", symbols=parents, stype_in="parent", start=day0, end=end)
-    defs = defs.sort_index().groupby("instrument_id").last()
-    # only what we use: options expiring inside the window + their futures → much smaller stats pull
-    exp_ = pd.to_datetime(defs["expiration"], utc=True)
-    keep = defs[(defs["instrument_class"] == "F") | (defs["instrument_class"].isin(["C", "P"]) & (exp_ > now) & (exp_ < now + pd.Timedelta(days=GEX_DAYS)))]
-    ids = [int(i) for i in keep.index]
-    print(f"{len(ids)} instruments to price")
-    parts, total = [], 0.0
+    # definitions per product (smaller requests = no gateway timeouts)
+    dparts = []
+    for name, p in PRODUCTS.items():
+        par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
+        dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end))
+    defs = pd.concat(dparts).sort_index().groupby("instrument_id").last()
     sstart = day0 - pd.Timedelta(days=3)         # covers the last OI publication (weekends too)
-    for i in range(0, len(ids), 1500):
-        kw = dict(schema="statistics", symbols=ids[i:i + 1500], stype_in="instrument_id", start=sstart, end=end)
+    # 1) futures first (tiny) → reference price per product
+    fids = [int(i) for i in defs.index[defs["instrument_class"] == "F"]]
+    fst = fetch(c, schema="statistics", symbols=fids, stype_in="instrument_id", start=sstart, end=end)
+    fset = fst[fst.stat_type == 3].sort_index().groupby("instrument_id").last()["price"]
+    ref = {}
+    for name, p in PRODUCTS.items():
+        fr = defs[(defs["instrument_class"] == "F") & defs["raw_symbol"].astype(str).str.match(rf"^{p['root']}[FGHJKMNQUVXZ]\d$")]
+        px = fset.reindex(fr.index).dropna()
+        if len(px):
+            ref[name] = float(px.loc[pd.to_datetime(fr.loc[px.index, "expiration"], utc=True).idxmin()]) if False else float(px.median())
+    # 2) only options near price and inside the expiry window
+    BAND = {"EUR": 0.05, "NAS": 0.12, "GOLD": 0.12}
+    exp_ = pd.to_datetime(defs["expiration"], utc=True)
+    near = pd.Series(False, index=defs.index)
+    for name, p in PRODUCTS.items():
+        if name not in ref:
+            continue
+        m = defs["asset"].isin(prods.get(name, [])) & defs["instrument_class"].isin(["C", "P"])
+        k = defs["strike_price"]
+        near |= m & (k > ref[name] * (1 - BAND[name])) & (k < ref[name] * (1 + BAND[name]))
+    keep = defs[near & (exp_ > now) & (exp_ < now + pd.Timedelta(days=GEX_DAYS))]
+    ids = [int(i) for i in keep.index]
+    print(f"{len(ids)} options to price · ref prices {ref}")
+    parts, total = [fst], 0.0
+    for i in range(0, len(ids), 400):
+        kw = dict(schema="statistics", symbols=ids[i:i + 400], stype_in="instrument_id", start=sstart, end=end)
         total += c.metadata.get_cost(dataset=DATASET, **kw)
         if total > MAX_COST:
             sys.exit(f"Stopped: statistics would cost ${total:.2f} (> MAX_COST ${MAX_COST}).")
