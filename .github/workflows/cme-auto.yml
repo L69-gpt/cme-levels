@@ -1,7 +1,7 @@
 name: CME auto levels
 on:
   schedule:
-    - cron: "0 5 * * 1-5"      # 09:00 Mauritius, Mon–Fri
+        - cron: "17 4 * * 1-5"     # 08:17 Mauritius, Mon–Fri
   workflow_dispatch:
     inputs:
       mode:
