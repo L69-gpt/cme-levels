@@ -1,26 +1,29 @@
 {
  "EUR": {
-  "week": "2026-W43",
-  "volw": 7.12,
+  "week": "2026-W44",
+  "volw": 7.02,
   "wexp": "Fri 30 Oct",
   "month": "2026-10",
   "volm": 7.12,
-  "mexp": "Fri 30 Oct"
+  "mexp": "Fri 30 Oct",
+  "rr": -0.391
  },
  "NAS": {
-  "week": "2026-W43",
-  "volw": 28.08,
-  "wexp": "Fri 30 Oct",
+  "week": "2026-W44",
+  "volw": 26.17,
+  "wexp": "Fri 06 Nov",
   "month": "2026-10",
   "volm": 28.08,
-  "mexp": "Fri 30 Oct"
+  "mexp": "Fri 30 Oct",
+  "rr": -6.913
  },
  "GOLD": {
-  "week": "2026-W43",
-  "volw": 20.6,
-  "wexp": "Fri 30 Oct",
+  "week": "2026-W44",
+  "volw": 22.7,
+  "wexp": "Fri 06 Nov",
   "month": "2026-10",
   "volm": 20.6,
-  "mexp": "Fri 30 Oct"
+  "mexp": "Fri 30 Oct",
+  "rr": -2.347
  }
 }
