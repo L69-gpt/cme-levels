@@ -15,6 +15,10 @@ PRODUCTS = {
     "EUR":  {"tv": "CME", "settle_utc": "19:00", "root": "6E", "mult": 125000, "spot": ["EURUSD=X"], "dec": 5},
     "NAS":  {"tv": "CME_MINI", "settle_utc": "20:15", "root": "NQ", "mult": 20,     "spot": ["^NDX"],     "dec": 2},
     "GOLD": {"tv": "COMEX", "settle_utc": "17:30", "root": "GC", "mult": 100,    "spot": ["XAUUSD=X"], "dec": 2},
+    # Treasury note futures (price levels; the indicator maps them onto the US02Y / US10Y yield charts)
+    # dur = approx. modified duration of the futures (CTD) → converts price moves to yield bp
+    "ZT":   {"tv": "CBOT", "settle_utc": "19:00", "root": "ZT", "mult": 2000,   "spot": [], "dec": 4, "dur": 1.9, "yld": "US 2y"},
+    "ZN":   {"tv": "CBOT", "settle_utc": "19:00", "root": "ZN", "mult": 1000,   "spot": [], "dec": 4, "dur": 6.3, "yld": "US 10y"},
 }
 GEX_DAYS = 35           # expiries inside this window count for GEX
 MAX_COST = float(os.environ.get("MAX_COST", "3"))
@@ -58,11 +62,15 @@ def discover(c):
     start = end - pd.Timedelta(hours=26)
     df = guarded(c, "all definitions (1 day)", schema="definition", symbols="ALL_SYMBOLS", start=start, end=end)
     opt = df[df["instrument_class"].isin(["C", "P"])].copy()
-    found = {}
+    try:
+        found = json.load(open("products.json"))
+    except Exception:
+        found = {}
     for name, p in PRODUCTS.items():
         sub = opt[opt["underlying"].astype(str).str.match(rf"^{p['root']}[FGHJKMNQUVXZ]\d{{1,2}}$")]
         codes = sorted(sub["asset"].astype(str).unique())
-        found[name] = codes
+        if codes:
+            found[name] = codes
         say(f"{name}: option products {codes}")
         for a in codes:
             s = sub[sub["asset"] == a]
@@ -164,7 +172,9 @@ def flows(o, vmap, mult_unused=None):
 # ───────── COT (free CFTC data, weekly) ─────────
 COT = {"EUR": ("gpe5-46if", "099741", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds"),
        "NAS": ("gpe5-46if", "209742", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds"),
-       "GOLD": ("72hh-3qpy", "088691", "m_money_positions_long_all", "m_money_positions_short_all", "Managed money")}
+       "GOLD": ("72hh-3qpy", "088691", "m_money_positions_long_all", "m_money_positions_short_all", "Managed money"),
+       "ZT": ("gpe5-46if", "042601", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds"),
+       "ZN": ("gpe5-46if", "043602", "lev_money_positions_long", "lev_money_positions_short", "Leveraged funds")}
 
 def cot_line(name):
     try:
@@ -204,6 +214,8 @@ def run(c):
     # definitions per product (smaller requests = no gateway timeouts)
     dparts = []
     for name, p in PRODUCTS.items():
+        if not prods.get(name):
+            print(f"{name}: no option codes in products.json yet (run discover once)"); continue
         par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
         dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end))
     defs = pd.concat(dparts).sort_index().groupby("instrument_id").last()
@@ -219,7 +231,7 @@ def run(c):
         if len(px):
             ref[name] = float(px.loc[pd.to_datetime(fr.loc[px.index, "expiration"], utc=True).idxmin()]) if False else float(px.median())
     # 2) only options near price and inside the expiry window
-    BAND = {"EUR": 0.05, "NAS": 0.12, "GOLD": 0.12}
+    BAND = {"EUR": 0.05, "NAS": 0.12, "GOLD": 0.12, "ZT": 0.02, "ZN": 0.05}
     exp_ = pd.to_datetime(defs["expiration"], utc=True)
     near = pd.Series(False, index=defs.index)
     for name, p in PRODUCTS.items():
@@ -251,6 +263,8 @@ def run(c):
     fut = defs[defs["instrument_class"] == "F"].set_index("raw_symbol")
 
     for name, p in PRODUCTS.items():
+        if not prods.get(name):
+            continue
         o = defs[defs["asset"].isin(prods.get(name, [])) & defs["instrument_class"].isin(["C", "P"])].copy()
         o["expiration"] = pd.to_datetime(o["expiration"], utc=True)
         o = o[(o.expiration > now) & (o.expiration < now + pd.Timedelta(days=GEX_DAYS))]
@@ -287,8 +301,8 @@ def run(c):
             say(f"\n{name}: no settlement prices yet"); continue
         ex = pd.DataFrame(exps).sort_values("exp")
         front = ex.iloc[0]
-        fri = ex[ex.exp.dt.weekday == 4]
-        weekly = fri.iloc[0] if len(fri) else front
+        wk_fri = (now + pd.Timedelta(days=(4 - now.weekday()) % 7)).normalize() + pd.Timedelta(hours=20)
+        weekly = ex.iloc[(ex.exp - wk_fri).abs().argsort()].iloc[0]
         # monthly: expiry closest to the end of this month
         mend = (now + pd.offsets.MonthEnd(0)).normalize() + pd.Timedelta(hours=21)
         monthly = ex.iloc[(ex.exp - mend).abs().argsort()].iloc[0]
@@ -341,7 +355,7 @@ def run(c):
         d = p["dec"]
         tod = o[(o.expiration > now) & (o.expiration <= now + pd.Timedelta(hours=24)) & (o.oi > 0)]
         big = tod.groupby("strike_price").oi.sum().sort_values(ascending=False).head(3) if len(tod) else pd.Series(dtype=float)
-        exp_txt = ("EXP " + " ".join(f"{k:.{d}f}" for k in big.index) + f" @{(tod.expiration.min() + pd.Timedelta(hours=4)):%H:%M}") if len(big) else ""
+        exp_txt = ("EXP " + " ".join(f"{k:.{d}f}" for k in big.index) + f" @{(tod.expiration.min() + pd.Timedelta(hours=4)):%Y-%m-%dT%H:%M}") if len(big) else ""
         f = lambda x: f"{x:.{d}f}"
         pos = g.sort_values("net", ascending=False).head(3).index
         neg = g.sort_values("net").head(3).index
@@ -351,14 +365,15 @@ def run(c):
             "POS " + " ".join(f(x) for x in pos), "NEG " + " ".join(f(x) for x in neg),
             f"VOLD {front.vol*100:.2f}", f"VOLW {volw:.2f}", f"VOLM {volm:.2f}", exp_txt, f"FUT {tv}"] if x)
         sd_ = fut.loc[front.und, "sdate"] if front.und in fut.index else None
-        say(f"\n— {name} (futures {front.und} settle {F0:.{d}f}" + (f" from {sd_:%a %d %b}" if sd_ is not None and not pd.isna(sd_) else "") + " · levels in futures prices, indicator converts them live)")
+        say(f"\n— {name}" + (f" = {p['yld']} note futures, levels show on the {'US02Y' if name == 'ZT' else 'US10Y'} chart" if "dur" in p else "") + f" (futures {front.und} settle {F0:.{d}f}" + (f" from {sd_:%a %d %b}" if sd_ is not None and not pd.isna(sd_) else "") + " · levels in futures prices, indicator converts them live)")
         say(f"Gamma now: {'POSITIVE (pinning, fade levels)' if tot(F0) > 0 else 'NEGATIVE (moves run)'}")
-        say(f"Daily 1SD ±{F0 * front.vol / math.sqrt(252):.{d}f} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
+        bp = (lambda pts: f" ≈ {pts / (F0 * p['dur']) * 1e4:.1f}bp of {p['yld']} yield") if "dur" in p else (lambda pts: "")
+        say(f"Daily 1SD ±{F0 * front.vol / math.sqrt(252):.{d}f}{bp(F0 * front.vol / math.sqrt(252))} (expiry {front.exp:%a %d %b}, vol {front.vol*100:.2f}%)")
         say(f"Weekly vol {volw:.2f}% (locked {stp['week']}, expiry {stp['wexp']}) · Monthly vol {volm:.2f}% (locked {stp['month']}, expiry {stp['mexp']})")
         # ── positioning extras: skew, term structure, vanna / charm ──
-        flip_note = " (DXY: opposite)" if name == "EUR" else ""
-        up_word = {"EUR": "EUR UP / USD down", "NAS": "NAS UP", "GOLD": "GOLD UP"}[name]
-        dn_word = {"EUR": "EUR DOWN / USD up", "NAS": "NAS DOWN", "GOLD": "GOLD DOWN"}[name]
+        flip_note = " (DXY: opposite)" if name == "EUR" else " (yield: opposite)" if "dur" in p else ""
+        up_word = {"EUR": "EUR UP / USD down", "NAS": "NAS UP", "GOLD": "GOLD UP"}.get(name, f"bonds UP = {p.get('yld', '')} YIELD DOWN")
+        dn_word = {"EUR": "EUR DOWN / USD up", "NAS": "NAS DOWN", "GOLD": "GOLD DOWN"}.get(name, f"bonds DOWN = {p.get('yld', '')} YIELD UP")
         try:
             gwk = o[(o.expiration == weekly.exp) & (o.underlying == weekly.und)]
             rr = rr25(gwk, weekly.F, weekly.ty if False else trading_years(now, weekly.exp))
