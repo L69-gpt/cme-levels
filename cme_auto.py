@@ -437,6 +437,12 @@ def telegram():
     for blk in text.split("\n\n"):
         if len(cur) + len(blk) + 2 > 3900 and cur:
             parts.append(cur); cur = ""
+        if len(blk) > 3900:                       # one huge block (e.g. discover) → split it by lines
+            for ln in blk.split("\n"):
+                if len(cur) + len(ln) + 1 > 3900 and cur:
+                    parts.append(cur); cur = ""
+                cur += ("\n" if cur else "") + ln
+            continue
         cur += ("\n\n" if cur else "") + blk
     if cur:
         parts.append(cur)
