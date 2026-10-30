@@ -199,6 +199,137 @@ def cot_line(name):
         print("cot failed:", e)
         return None
 
+# ───────── Level scorecard: log each day's levels, score them after the day ends ─────────
+# Futures prices (same units as the levels) from Yahoo 15m bars. Free.
+YF = {"EUR": "6E=F", "NAS": "NQ=F", "GOLD": "GC=F", "ZT": "ZT=F", "ZN": "ZN=F"}
+KIND_NAME = {"FLIP": "Flip", "PUT": "Put wall", "CALL": "Call wall", "POS": "+γ pin", "NEG": "−γ accel",
+             "SD05": "±0.5SD", "SD1": "±1SD", "EXP": "EXP pin"}
+
+def day_window(now):
+    """Trading day ends 17:00 New York. Returns (day start, day end) in UTC for the day 'now' is in."""
+    ny = now.tz_convert("America/New_York")
+    end = ny.normalize() + pd.Timedelta(hours=17)
+    if end <= ny:
+        end += pd.Timedelta(days=1)
+    while end.weekday() >= 5:
+        end += pd.Timedelta(days=1)
+    start = end - pd.Timedelta(days=1)
+    if start.weekday() == 4 or start.weekday() >= 5:     # Monday's session starts Sunday 17:00
+        start = end - pd.Timedelta(days=1)
+    return start.tz_convert("UTC"), end.tz_convert("UTC")
+
+def log_levels(state, name, now, lv, sd1, regime, exp_cut):
+    """Keep one entry per product per trading day (the latest run of the day wins: freshest OI)."""
+    st, en = day_window(now)
+    lg = state.setdefault("log", [])
+    old = [e for e in lg if e["p"] == name and e["end"] == en.isoformat() and not e.get("done")]
+    t0 = min([pd.Timestamp(e["t"]) for e in old] + [now])      # score from the FIRST run of the day
+    lg[:] = [e for e in lg if e not in old]
+    lg.append(dict(p=name, start=st.isoformat(), end=en.isoformat(), t=t0.isoformat(), lv=lv,
+                   sd=float(sd1), reg=regime, cut=exp_cut))
+    state["log"] = lg[-400:]
+
+def _score_one(px, L, sd, from_t):
+    """held = after the first touch price moved 0.5SD away on the side it came from, before closing 0.3SD through.
+       broke = closed 0.3SD through first. chop = neither within 4h. miss = never touched."""
+    tol = 0.05 * sd
+    p = px[px.index >= from_t]
+    hit = p[(p.Low <= L + tol) & (p.High >= L - tol)]
+    if hit.empty:
+        return "miss"
+    i = p.index.get_loc(hit.index[0])
+    before = p.Close.iloc[i - 1] if i > 0 else p.Open.iloc[i]
+    above = before > L
+    for _, b in p.iloc[i:i + 16].iterrows():
+        if above:
+            if b.Close < L - 0.3 * sd: return "broke"
+            if b.High >= L + 0.5 * sd: return "held"
+        else:
+            if b.Close > L + 0.3 * sd: return "broke"
+            if b.Low <= L - 0.5 * sd: return "held"
+    return "chop"
+
+def score_logs(state, now):
+    lg = state.get("log", [])
+    todo = [e for e in lg if not e.get("done") and pd.Timestamp(e["end"]) < now]
+    if not todo:
+        return
+    try:
+        import yfinance as yf
+    except Exception as e:
+        print("scorecard: yfinance missing", e); return
+    cache = {}
+    sc = state.setdefault("score", {})
+    for e in todo:
+        sym = YF.get(e["p"])
+        if not sym:
+            e["done"] = True; continue
+        if sym not in cache:
+            try:
+                h = yf.Ticker(sym).history(period="30d", interval="15m")
+                h.index = h.index.tz_convert("UTC")
+                cache[sym] = h
+            except Exception as ex:
+                print("scorecard fetch failed", sym, ex); cache[sym] = None
+        h = cache[sym]
+        if h is None or h.empty:
+            continue
+        st, en, t0 = pd.Timestamp(e["start"]), pd.Timestamp(e["end"]), pd.Timestamp(e["t"])
+        px = h[(h.index >= st) & (h.index < en)]
+        if px.empty:
+            e["done"] = True; continue
+        sd, reg = e["sd"], e["reg"]
+        lv = dict(e["lv"])
+        o = float(px.Open.iloc[0])                          # daily open (futures) → daily SD bands
+        lv["SD05"] = [o - 0.5 * sd, o + 0.5 * sd]
+        lv["SD1"] = [o - sd, o + sd]
+        pp = sc.setdefault(e["p"], {})
+        for kind, vals in lv.items():
+            if kind == "EXP":
+                continue
+            for L in vals:
+                r = _score_one(px, float(L), sd, t0 if kind not in ("SD05", "SD1") else st)
+                c = pp.setdefault(f"{kind}|{reg}", {"held": 0, "broke": 0, "chop": 0, "miss": 0})
+                c[r] += 1
+        # EXP pins: pinned = price within 0.25SD of the strike at the cut
+        if e.get("cut") and lv.get("EXP"):
+            cut = pd.Timestamp(e["cut"])
+            atc = h[h.index <= cut]
+            if len(atc) and cut <= h.index[-1]:
+                pc = float(atc.Close.iloc[-1])
+                c = pp.setdefault(f"EXP|{reg}", {"pinned": 0, "not": 0})
+                L = float(lv["EXP"][0])                      # the biggest expiring strike
+                c["pinned" if abs(pc - L) <= 0.25 * sd else "not"] += 1
+        e["done"] = True
+    state["log"] = lg
+
+def score_line(state, name):
+    pp = state.get("score", {}).get(name)
+    if not pp:
+        return None
+    days = len({e["end"] for e in state.get("log", []) if e["p"] == name and e.get("done")})
+    out = []
+    for kind in ["PUT", "CALL", "FLIP", "POS", "NEG", "SD05", "SD1", "EXP"]:
+        rows = {k.split("|")[1]: v for k, v in pp.items() if k.split("|")[0] == kind}
+        if not rows:
+            continue
+        def rate(v):
+            if kind == "EXP":
+                n = v.get("pinned", 0) + v.get("not", 0); return v.get("pinned", 0), n
+            n = v["held"] + v["broke"] + v["chop"]
+            return (v["broke"] if kind == "NEG" else v["held"]), n
+        tot_k = sum(rate(v)[0] for v in rows.values()); tot_n = sum(rate(v)[1] for v in rows.values())
+        if tot_n == 0:
+            continue
+        word = "broke" if kind == "NEG" else "pinned" if kind == "EXP" else "held"
+        txt = f"{KIND_NAME[kind]} {word} {tot_k}/{tot_n} ({100 * tot_k / tot_n:.0f}%)"
+        if kind in ("SD05", "SD1", "PUT", "CALL") and len(rows) > 1:
+            txt += " [" + " · ".join(f"{r}γ {rate(v)[0]}/{rate(v)[1]}" for r, v in rows.items() if rate(v)[1]) + "]"
+        out.append(txt)
+    if not out:
+        return None
+    return f"Scorecard ({days} day{'s' if days != 1 else ''} scored, levels touched only): " + " · ".join(out)
+
 # ───────── Daily run ─────────
 def run(c):
     prods = json.load(open("products.json"))
@@ -208,6 +339,10 @@ def run(c):
         state = {}
     end = data_end(c)
     now = pd.Timestamp.now(tz="UTC")
+    try:
+        score_logs(state, now)
+    except Exception as e_:
+        print("scorecard scoring failed:", e_)
     day0 = end.normalize()                       # definitions snapshot = UTC midnight
     if end - day0 < pd.Timedelta(hours=2):
         day0 -= pd.Timedelta(days=1)
@@ -403,6 +538,17 @@ def run(c):
         cl = cot_line(name)
         if cl:
             say(cl)
+        try:
+            reg = "+" if tot(F0) > 0 else "−"
+            lv = {"FLIP": [float(x) for x in flips], "PUT": [float(g.p.idxmin())], "CALL": [float(g.c.idxmax())],
+                  "POS": [float(x) for x in pos], "NEG": [float(x) for x in neg], "EXP": [float(x) for x in big.index]}
+            log_levels(state, name, now, lv, F0 * front.vol / math.sqrt(252), reg,
+                       tod.expiration.min().isoformat() if len(big) else None)
+            sl = score_line(state, name)
+            if sl:
+                say(sl)
+        except Exception as e_:
+            print("scorecard log failed:", e_)
         say("PASTE:\n" + paste)
         if gw is not None:
             say(f"This week only (to {weekly.exp:%a %d %b}): " + "; ".join(x for x in [
