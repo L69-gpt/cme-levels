@@ -35,22 +35,29 @@ def client():
     return db.Historical(k)
 
 def data_end(c):
-    r = c.metadata.get_dataset_range(dataset=DATASET)
+    r = retry(lambda: c.metadata.get_dataset_range(dataset=DATASET), "dataset_range")
     return pd.Timestamp(r.get("end") or r.get("end_date"))
 
-def fetch(c, **kw):
+def retry(fn, label="databento"):
+    # Databento sometimes drops the stream ("Response ended prematurely") or times out (504).
+    # Retry ANY Databento / network error with growing waits (~13 min total) before giving up.
     import time
-    for i in range(5):
+    waits = [30, 60, 120, 240, 330]
+    for i in range(len(waits) + 1):
         try:
-            return c.timeseries.get_range(dataset=DATASET, **kw).to_df()
+            return fn()
         except Exception as e:
-            if i == 4 or not isinstance(e, db.BentoServerError):
+            transient = isinstance(e, getattr(db, "BentoError", Exception)) or any(w in str(e) for w in ("prematurely", "504", "timed out", "Timeout", "Connection", "502", "503"))
+            if i == len(waits) or not transient:
                 raise
-            print(f"retry {i+1} after: {e}")
-            time.sleep(30 * (i + 1))
+            print(f"[{label}] retry {i+1} in {waits[i]}s after: {e}")
+            time.sleep(waits[i])
+
+def fetch(c, **kw):
+    return retry(lambda: c.timeseries.get_range(dataset=DATASET, **kw).to_df(), "get_range")
 
 def guarded(c, label, **kw):
-    cost = c.metadata.get_cost(dataset=DATASET, **kw)
+    cost = retry(lambda: c.metadata.get_cost(dataset=DATASET, **kw), "cost")
     print(f"[cost] {label}: ${cost:.4f}")
     if cost > MAX_COST:
         sys.exit(f"Stopped: {label} would cost ${cost:.2f} (> MAX_COST ${MAX_COST}). Raise MAX_COST if you're sure.")
@@ -379,9 +386,9 @@ def run(c):
     ids = [int(i) for i in keep.index]
     print(f"{len(ids)} options to price · ref prices {ref}")
     parts, total = [fst], 0.0
-    for i in range(0, len(ids), 400):
-        kw = dict(schema="statistics", symbols=ids[i:i + 400], stype_in="instrument_id", start=sstart, end=end)
-        total += c.metadata.get_cost(dataset=DATASET, **kw)
+    for i in range(0, len(ids), 200):
+        kw = dict(schema="statistics", symbols=ids[i:i + 200], stype_in="instrument_id", start=sstart, end=end)
+        total += retry(lambda: c.metadata.get_cost(dataset=DATASET, **kw), "cost")
         if total > MAX_COST:
             sys.exit(f"Stopped: statistics would cost ${total:.2f} (> MAX_COST ${MAX_COST}).")
         parts.append(fetch(c, **kw))
