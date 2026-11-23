@@ -2,7 +2,6 @@
 computes dealer GEX levels and straddle-based SD vols, and sends ready paste lines to Telegram.
 
 Modes:
-  python cme_auto.py --refresh    → Sunday job: saves the contract list (defs_cache.csv.gz) so Monday needs only small downloads
   python cme_auto.py --discover   → finds the option product codes for 6E / NQ / GC and prints the cost (cheap, run once)
   python cme_auto.py              → daily run (needs products.json from discover)
 Env: DATABENTO_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAX_COST (USD, default 3), BASIS_EUR/BASIS_NAS/BASIS_GOLD (optional overrides)
@@ -23,12 +22,6 @@ PRODUCTS = {
 }
 GEX_DAYS = 35           # expiries inside this window count for GEX
 MAX_COST = float(os.environ.get("MAX_COST", "3"))
-RUN_BUDGET_MIN = float(os.environ.get("RUN_BUDGET_MIN", "10"))   # hard cap per run, then fall back to last good levels
-# scheduled tries per weekday (UTC) — must match the workflow crons. Mauritius = UTC+4.
-TRIES_UTC = ["04:17", "05:02", "06:02", "08:02"]
-CACHE = "defs_cache.csv.gz"     # saved contract list (definitions) per market
-LAST = "last_levels.txt"        # last message that worked, re-sent as STALE when Databento is down
-DEF_COLS = ["instrument_class", "raw_symbol", "asset", "underlying", "strike_price", "expiration"]
 OUT = []
 
 def say(s=""):
@@ -45,32 +38,30 @@ def data_end(c):
     r = retry(lambda: c.metadata.get_dataset_range(dataset=DATASET), "dataset_range")
     return pd.Timestamp(r.get("end") or r.get("end_date"))
 
-def retry(fn, label="databento", waits=None):
+def retry(fn, label="databento"):
     # Databento sometimes drops the stream ("Response ended prematurely") or times out (504).
     # Retry ANY Databento / network error with growing waits (~13 min total) before giving up.
     import time
-    waits = waits or [20, 40, 80, 120]
+    waits = [30, 60, 120, 240, 330]
     for i in range(len(waits) + 1):
         try:
             return fn()
         except Exception as e:
-            if isinstance(e, getattr(db, "BentoClientError", ())):
-                raise                                   # 4xx = bad request (e.g. expired code) → retrying won't help
             transient = isinstance(e, getattr(db, "BentoError", Exception)) or any(w in str(e) for w in ("prematurely", "504", "timed out", "Timeout", "Connection", "502", "503"))
             if i == len(waits) or not transient:
                 raise
             print(f"[{label}] retry {i+1} in {waits[i]}s after: {e}")
             time.sleep(waits[i])
 
-def fetch(c, _waits=None, **kw):
-    return retry(lambda: c.timeseries.get_range(dataset=DATASET, **kw).to_df(), "get_range", _waits)
+def fetch(c, **kw):
+    return retry(lambda: c.timeseries.get_range(dataset=DATASET, **kw).to_df(), "get_range")
 
-def guarded(c, label, _waits=None, **kw):
+def guarded(c, label, **kw):
     cost = retry(lambda: c.metadata.get_cost(dataset=DATASET, **kw), "cost")
     print(f"[cost] {label}: ${cost:.4f}")
     if cost > MAX_COST:
         sys.exit(f"Stopped: {label} would cost ${cost:.2f} (> MAX_COST ${MAX_COST}). Raise MAX_COST if you're sure.")
-    return fetch(c, _waits=_waits, **kw)
+    return fetch(c, **kw)
 
 # ───────── Discover: which option product codes belong to 6E / NQ / GC ─────────
 def discover(c):
@@ -346,59 +337,6 @@ def score_line(state, name):
         return None
     return f"Scorecard ({days} day{'s' if days != 1 else ''} scored, levels touched only): " + " · ".join(out)
 
-# ───────── Saved contract list (definitions) — so daily runs only need the small OI download ─────────
-def load_cache():
-    try:
-        d = pd.read_csv(CACHE)
-    except Exception:
-        return pd.DataFrame()
-    d["expiration"] = pd.to_datetime(d["expiration"], utc=True)
-    age = pd.Timestamp.now(tz="UTC") - pd.to_datetime(d["cached_at"], utc=True)
-    d = d[age < pd.Timedelta(days=10)]                     # too old → ignore (new expiries missing)
-    d.index = pd.DatetimeIndex([pd.Timestamp("2000-01-01", tz="UTC")] * len(d), name="ts_recv")
-    return d
-
-def put_cache(cache, name, df, now):
-    if df is None or not len(df):
-        return cache
-    d = df.reset_index(drop=True)[["instrument_id"] + DEF_COLS].copy()
-    d["expiration"] = pd.to_datetime(d["expiration"], utc=True)
-    fut = d["instrument_class"] == "F"
-    d = d[fut | ((d["expiration"] > now) & (d["expiration"] < now + pd.Timedelta(days=GEX_DAYS + 14)))]
-    d = d.drop_duplicates("instrument_id", keep="last")
-    d["prod"], d["cached_at"] = name, now.isoformat()
-    d.index = pd.DatetimeIndex([pd.Timestamp("2000-01-01", tz="UTC")] * len(d), name="ts_recv")
-    keep = cache[cache["prod"] != name] if len(cache) else cache
-    return pd.concat([keep, d]) if len(keep) else d
-
-def save_cache(cache):
-    if len(cache):
-        cache.reset_index(drop=True).to_csv(CACHE, index=False)
-        print(f"[cache] saved {len(cache)} contracts for {sorted(cache['prod'].unique())}", flush=True)
-    else:
-        print("[cache] nothing to save", flush=True)
-
-def refresh(c):
-    """Sunday job: save Friday's full contract list while Databento is quiet (warms Monday's run)."""
-    now = pd.Timestamp.now(tz="UTC")
-    end = data_end(c)
-    day0 = end.normalize()
-    while day0.weekday() >= 5:
-        day0 -= pd.Timedelta(days=1)
-    prods = json.load(open("products.json"))
-    cache = load_cache()
-    for name, p in PRODUCTS.items():
-        if not prods.get(name):
-            continue
-        par = [f"{a}.OPT" for a in prods[name]] + [f"{p['root']}.FUT"]
-        try:
-            df_ = guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=day0 + pd.Timedelta(hours=2), _waits=[30, 60, 120])
-            cache = put_cache(cache, name, df_, now)
-            print(f"{name}: saved {len(df_)} contracts")
-        except Exception as e:
-            print(f"{name}: refresh failed ({e}), keeping the old list")
-    save_cache(cache)
-
 # ───────── Daily run ─────────
 def run(c):
     prods = json.load(open("products.json"))
@@ -416,47 +354,12 @@ def run(c):
     if end - day0 < pd.Timedelta(hours=2):
         day0 -= pd.Timedelta(days=1)
     # definitions per product (smaller requests = no gateway timeouts)
-    dend = min(end, day0 + pd.Timedelta(hours=2))   # definitions snapshot is at UTC midnight → small window = small request
-    dparts, skipped, cached = [], [], []
-    cache = load_cache()
+    dparts = []
     for name, p in PRODUCTS.items():
         if not prods.get(name):
             print(f"{name}: no option codes in products.json yet (run discover once)"); continue
         par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
-        try:
-            # the contract list is the big request that times out → one quick try only
-            df_ = guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=dend, _waits=[20, 40])
-            dparts.append(df_)
-            try:
-                cache = put_cache(cache, name, df_, now); save_cache(cache)     # save right away (survives the 10-min cap)
-            except Exception as e3:
-                print(f"[cache] {name}: could not save ({type(e3).__name__}: {e3}); columns {list(df_.columns)[:12]}", flush=True)
-            continue
-        except Exception as e_:
-            print(f"{name}: fresh definitions failed ({e_})")
-        cd = cache[cache["prod"] == name] if len(cache) else cache
-        if len(cd):
-            print(f"{name}: using saved contract list ({len(cd)} contracts)")
-            dparts.append(cd.drop(columns=["prod"]))
-            cached.append(name)
-            continue
-        # no saved list yet → ask for each option code on its own (small requests)
-        got = []
-        for sym in par:
-            try:
-                got.append(fetch(c, schema="definition", symbols=[sym], stype_in="parent", start=day0, end=dend, _waits=[10]))
-            except Exception as e2:
-                print(f"  {sym}: failed ({e2})")
-        if got:
-            dparts.extend(got)
-            cache = put_cache(cache, name, pd.concat(got), now); save_cache(cache)
-        else:
-            skipped.append(name)
-            prods[name] = []          # no data for this market today → skip it, keep the others
-            print(f"{name}: skipped today (Databento timeout)")
-    save_cache(cache)
-    if not dparts:
-        raise RuntimeError("no contract data from Databento for any market")
+        dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end))
     defs = pd.concat(dparts).sort_index().groupby("instrument_id").last()
     sstart = day0 - pd.Timedelta(days=3)         # covers the last OI publication (weekends too)
     # 1) futures first (tiny) → reference price per product
@@ -503,8 +406,6 @@ def run(c):
 
     for name, p in PRODUCTS.items():
         if not prods.get(name):
-            if name in skipped:
-                say(f"\n— {name}: skipped today (Databento timed out). Use yesterday's {name} levels.")
             continue
         o = defs[defs["asset"].isin(prods.get(name, [])) & defs["instrument_class"].isin(["C", "P"])].copy()
         o["expiration"] = pd.to_datetime(o["expiration"], utc=True)
@@ -701,92 +602,18 @@ def telegram():
     for part in parts:
         requests.post(f"https://api.telegram.org/bot{tok}/sendMessage", data={"chat_id": chat, "text": part[:4000]}, timeout=20)
 
-def today_key(now):
-    return day_window(now)[1].strftime("%Y-%m-%d")
-
-def load_state():
-    try:
-        return json.load(open("state.json"))
-    except Exception:
-        return {}
-
-def next_try(now):
-    if now.weekday() >= 5:
-        return None
-    for t in TRIES_UTC:
-        ts = now.normalize() + pd.Timedelta(t + ":00")
-        if ts > now + pd.Timedelta(minutes=5):
-            return ts
-    return None
-
-def on_success(now):
-    st = load_state()
-    st["last_ok"], st["last_ok_at"] = today_key(now), now.isoformat()
-    st.pop("fail_day", None); st.pop("fails", None)
-    save_state(st)
-    open(LAST, "w").write("\n".join(OUT))
-
-def on_fail(now, err, manual):
-    """Databento down: send the last good levels once (marked STALE), then retry quietly on schedule."""
-    st = load_state()
-    day = today_key(now)
-    n = st.get("fails", 0) + 1 if st.get("fail_day") == day else 1
-    st["fail_day"], st["fails"] = day, n
-    save_state(st)
-    nt = next_try(now)
-    when = f"{(nt + pd.Timedelta(hours=4)):%H:%M} Mauritius" if nt is not None else None
-    OUT.clear()
-    if st.get("last_ok") == day:
-        print("levels already sent today; nothing to send"); return
-    if n == 1 or manual:
-        try:
-            old = open(LAST).read()
-        except Exception:
-            old = ""
-        say(f"⚠️ CME levels: Databento is down ({err}).")
-        say(f"Auto-retrying at {when}, nothing for you to do." if when else "No more tries today; tomorrow's 08:17 run tries again.")
-        if old and n == 1:
-            say(f"\nBelow are the LAST GOOD levels (from {st.get('last_ok', '?')}). STALE, use with care:\n")
-            say(old)
-    elif nt is None:
-        say(f"CME levels: Databento still down after {n} tries today. Keep using the STALE levels sent earlier; tomorrow's 08:17 run tries again.")
-    else:
-        print(f"try {n} failed, staying quiet; next try {when}")
-
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--discover", action="store_true")
     ap.add_argument("--oitime", action="store_true")
-    ap.add_argument("--refresh", action="store_true")
     a = ap.parse_args()
     c = client()
-    now = pd.Timestamp.now(tz="UTC")
-    if a.refresh:
-        refresh(c); sys.exit(0)
-    if a.discover or a.oitime:
-        oi_times(c) if a.oitime else discover(c)
-        open("levels.txt", "w").write("\n".join(OUT)); telegram(); sys.exit(0)
-    manual = os.environ.get("EVENT") == "workflow_dispatch"
-    if not manual and load_state().get("last_ok") == today_key(now):
-        print("Today's levels already sent; retry slot not needed."); sys.exit(0)
-    import signal
-    class RunCap(BaseException):      # BaseException so per-market "except Exception" handlers can't swallow it
-        pass
-    def _cap(*_):
-        raise RunCap(f"no answer within {RUN_BUDGET_MIN:g} min")
-    signal.signal(signal.SIGALRM, _cap)
-    signal.alarm(int(RUN_BUDGET_MIN * 60))
     try:
-        run(c)
-        signal.alarm(0)
+        oi_times(c) if a.oitime else discover(c) if a.discover else run(c)
     except SystemExit as e:
-        signal.alarm(0)
         say(f"CME levels stopped: {e}"); open("levels.txt", "w").write("\n".join(OUT)); telegram(); raise
-    except BaseException as e:
-        signal.alarm(0)
+    except Exception as e:
         import traceback; traceback.print_exc()
-        on_fail(now, str(e)[:120] if type(e).__name__ == "RunCap" else f"{type(e).__name__}: {str(e)[:120]}", manual)
-        open("levels.txt", "w").write("\n".join(OUT)); telegram(); sys.exit(0)
-    on_success(now)
+        say(f"CME levels FAILED: {type(e).__name__}: {str(e)[:300]}"); open("levels.txt", "w").write("\n".join(OUT)); telegram(); raise
     open("levels.txt", "w").write("\n".join(OUT))
     telegram()

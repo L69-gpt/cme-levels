@@ -1,27 +1,19 @@
 name: CME auto levels
 on:
   schedule:
-        - cron: "17 4 * * 1-5"     # 08:17 Mauritius, Mon–Fri (main run)
-        - cron: "2 5 * * 1-5"      # 09:02 auto-retry (skips itself if 08:17 worked)
-        - cron: "2 6 * * 1-5"      # 10:02 auto-retry
-        - cron: "2 8 * * 1-5"      # 12:02 last auto-retry
-        - cron: "17 20 * * 0"      # Sunday 00:17 Mauritius: save the contract list for Monday
+        - cron: "17 4 * * 1-5"     # 08:17 Mauritius, Mon–Fri
   workflow_dispatch:
     inputs:
       mode:
         description: "discover (run once first) or daily"
         default: "daily"
         type: choice
-        options: [daily, discover, refresh]
+        options: [daily, discover]
 permissions:
   contents: write
-concurrency:
-  group: cme-levels
-  cancel-in-progress: false
 jobs:
   levels:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,22 +26,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MAX_COST: "3"
-          RUN_BUDGET_MIN: "10"
-          EVENT: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event.inputs.mode }}" = "discover" ]; then python cme_auto.py --discover
-          elif [ "${{ github.event.inputs.mode }}" = "refresh" ] || [ "${{ github.event.schedule }}" = "17 20 * * 0" ]; then python cme_auto.py --refresh
-          else python cme_auto.py; fi
+          if [ "${{ github.event.inputs.mode }}" = "discover" ]; then python cme_auto.py --discover; else python cme_auto.py; fi
       - name: Save products.json / state.json
         if: always()
         run: |
           git config user.name "cme-bot"; git config user.email "bot@users.noreply.github.com"
-          ls -la *.json *.gz *.txt 2>/dev/null || true
-          git add products.json state.json $(ls defs_cache.csv.gz last_levels.txt 2>/dev/null)
-          git commit -m "bot: update state" && (git push || (git pull --rebase -q && git push)) || echo "nothing to commit"
+          git add products.json state.json 2>/dev/null; git commit -m "bot: update state" && git push || echo "nothing to commit"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: levels
           path: levels.txt
-          if-no-files-found: ignore
