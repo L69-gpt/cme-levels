@@ -38,11 +38,11 @@ def data_end(c):
     r = retry(lambda: c.metadata.get_dataset_range(dataset=DATASET), "dataset_range")
     return pd.Timestamp(r.get("end") or r.get("end_date"))
 
-def retry(fn, label="databento"):
+def retry(fn, label="databento", waits=None):
     # Databento sometimes drops the stream ("Response ended prematurely") or times out (504).
     # Retry ANY Databento / network error with growing waits (~13 min total) before giving up.
     import time
-    waits = [30, 60, 120, 240, 330]
+    waits = waits or [30, 60, 120, 240, 330]
     for i in range(len(waits) + 1):
         try:
             return fn()
@@ -53,15 +53,15 @@ def retry(fn, label="databento"):
             print(f"[{label}] retry {i+1} in {waits[i]}s after: {e}")
             time.sleep(waits[i])
 
-def fetch(c, **kw):
-    return retry(lambda: c.timeseries.get_range(dataset=DATASET, **kw).to_df(), "get_range")
+def fetch(c, _waits=None, **kw):
+    return retry(lambda: c.timeseries.get_range(dataset=DATASET, **kw).to_df(), "get_range", _waits)
 
-def guarded(c, label, **kw):
+def guarded(c, label, _waits=None, **kw):
     cost = retry(lambda: c.metadata.get_cost(dataset=DATASET, **kw), "cost")
     print(f"[cost] {label}: ${cost:.4f}")
     if cost > MAX_COST:
         sys.exit(f"Stopped: {label} would cost ${cost:.2f} (> MAX_COST ${MAX_COST}). Raise MAX_COST if you're sure.")
-    return fetch(c, **kw)
+    return fetch(c, _waits=_waits, **kw)
 
 # ───────── Discover: which option product codes belong to 6E / NQ / GC ─────────
 def discover(c):
@@ -354,12 +354,28 @@ def run(c):
     if end - day0 < pd.Timedelta(hours=2):
         day0 -= pd.Timedelta(days=1)
     # definitions per product (smaller requests = no gateway timeouts)
-    dparts = []
+    dparts, skipped = [], []
     for name, p in PRODUCTS.items():
         if not prods.get(name):
             print(f"{name}: no option codes in products.json yet (run discover once)"); continue
         par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
-        dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end))
+        try:
+            dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end, _waits=[30, 60, 120]))
+        except Exception as e_:
+            # one big request keeps timing out → ask for each option code on its own (small requests)
+            print(f"{name}: definitions in one request failed ({e_}); trying code by code")
+            got = []
+            for sym in par:
+                try:
+                    got.append(fetch(c, schema="definition", symbols=[sym], stype_in="parent", start=day0, end=end, _waits=[15, 30, 60]))
+                except Exception as e2:
+                    print(f"  {sym}: failed ({e2})")
+            if got:
+                dparts.extend(got)
+            else:
+                skipped.append(name)
+                prods[name] = []          # no data for this market today → skip it, keep the others
+                print(f"{name}: skipped today (Databento timeout)")
     defs = pd.concat(dparts).sort_index().groupby("instrument_id").last()
     sstart = day0 - pd.Timedelta(days=3)         # covers the last OI publication (weekends too)
     # 1) futures first (tiny) → reference price per product
@@ -406,6 +422,8 @@ def run(c):
 
     for name, p in PRODUCTS.items():
         if not prods.get(name):
+            if name in skipped:
+                say(f"\n— {name}: skipped today (Databento timed out). Use yesterday's {name} levels.")
             continue
         o = defs[defs["asset"].isin(prods.get(name, [])) & defs["instrument_class"].isin(["C", "P"])].copy()
         o["expiration"] = pd.to_datetime(o["expiration"], utc=True)
