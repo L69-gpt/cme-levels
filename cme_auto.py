@@ -47,6 +47,8 @@ def retry(fn, label="databento"):
         try:
             return fn()
         except Exception as e:
+            if isinstance(e, getattr(db, "BentoClientError", ())):
+                raise                                   # 4xx = bad request (e.g. expired option code): retrying won't help
             transient = isinstance(e, getattr(db, "BentoError", Exception)) or any(w in str(e) for w in ("prematurely", "504", "timed out", "Timeout", "Connection", "502", "503"))
             if i == len(waits) or not transient:
                 raise
@@ -359,7 +361,12 @@ def run(c):
         if not prods.get(name):
             print(f"{name}: no option codes in products.json yet (run discover once)"); continue
         par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
-        dparts.append(guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end))
+        # Databento support: ask for at most 4-5 option parents per call (one big call times out with 504)
+        for i in range(0, len(par), 4):
+            try:
+                dparts.append(guarded(c, f"definitions {name} {i // 4 + 1}/{-(-len(par) // 4)}", schema="definition", symbols=par[i:i + 4], stype_in="parent", start=day0, end=end))
+            except db.BentoClientError as e_:
+                print(f"{name}: skipped codes {par[i:i + 4]} (Databento rejected them: {str(e_)[:80]})")
     defs = pd.concat(dparts).sort_index().groupby("instrument_id").last()
     sstart = day0 - pd.Timedelta(days=3)         # covers the last OI publication (weekends too)
     # 1) futures first (tiny) → reference price per product
