@@ -2689,7 +2689,8 @@
    },
    "sd": 0.0035572571674278215,
    "reg": "\u2212",
-   "cut": "2026-11-20T15:00:00+00:00"
+   "cut": "2026-11-20T15:00:00+00:00",
+   "done": true
   },
   {
    "p": "NAS",
@@ -2724,7 +2725,8 @@
    },
    "sd": 735.2893638627806,
    "reg": "\u2212",
-   "cut": "2026-11-20T21:00:00+00:00"
+   "cut": "2026-11-20T21:00:00+00:00",
+   "done": true
   },
   {
    "p": "GOLD",
@@ -2757,7 +2759,8 @@
    },
    "sd": 57.59526089013399,
    "reg": "\u2212",
-   "cut": "2026-11-20T18:30:00+00:00"
+   "cut": "2026-11-20T18:30:00+00:00",
+   "done": true
   },
   {
    "p": "ZT",
@@ -2792,7 +2795,8 @@
    },
    "sd": 0.10789365713361666,
    "reg": "\u2212",
-   "cut": "2026-11-20T22:00:00+00:00"
+   "cut": "2026-11-20T22:00:00+00:00",
+   "done": true
   },
   {
    "p": "ZN",
@@ -2827,7 +2831,8 @@
    },
    "sd": 0.3886754355043455,
    "reg": "+",
-   "cut": "2026-11-20T22:00:00+00:00"
+   "cut": "2026-11-20T22:00:00+00:00",
+   "done": true
   }
  ],
  "ZT": {
@@ -2854,16 +2859,16 @@
     "held": 1,
     "broke": 2,
     "chop": 1,
-    "miss": 12
+    "miss": 13
    },
    "PUT|\u2212": {
-    "held": 1,
+    "held": 2,
     "broke": 6,
     "chop": 1,
     "miss": 7
    },
    "CALL|\u2212": {
-    "held": 1,
+    "held": 2,
     "broke": 3,
     "chop": 0,
     "miss": 11
@@ -2872,29 +2877,29 @@
     "held": 0,
     "broke": 1,
     "chop": 1,
-    "miss": 43
+    "miss": 46
    },
    "NEG|\u2212": {
-    "held": 1,
+    "held": 2,
     "broke": 7,
     "chop": 4,
-    "miss": 33
+    "miss": 35
    },
    "SD05|\u2212": {
-    "held": 7,
+    "held": 8,
     "broke": 9,
     "chop": 5,
-    "miss": 9
+    "miss": 10
    },
    "SD1|\u2212": {
     "held": 3,
     "broke": 4,
     "chop": 4,
-    "miss": 19
+    "miss": 21
    },
    "EXP|\u2212": {
     "pinned": 1,
-    "not": 12
+    "not": 13
    }
   },
   "NAS": {
@@ -2902,46 +2907,46 @@
     "held": 1,
     "broke": 0,
     "chop": 1,
-    "miss": 7
+    "miss": 8
    },
    "PUT|\u2212": {
     "held": 2,
     "broke": 1,
     "chop": 3,
-    "miss": 7
+    "miss": 8
    },
    "CALL|\u2212": {
     "held": 2,
     "broke": 0,
     "chop": 0,
-    "miss": 11
+    "miss": 12
    },
    "POS|\u2212": {
     "held": 1,
     "broke": 3,
     "chop": 1,
-    "miss": 34
+    "miss": 37
    },
    "NEG|\u2212": {
-    "held": 5,
+    "held": 7,
     "broke": 6,
     "chop": 5,
-    "miss": 23
+    "miss": 24
    },
    "SD05|\u2212": {
     "held": 6,
     "broke": 8,
-    "chop": 3,
-    "miss": 9
+    "chop": 4,
+    "miss": 10
    },
    "SD1|\u2212": {
     "held": 5,
-    "broke": 1,
+    "broke": 2,
     "chop": 6,
-    "miss": 14
+    "miss": 15
    },
    "EXP|\u2212": {
-    "pinned": 1,
+    "pinned": 2,
     "not": 8
    },
    "FLIP|+": {
@@ -3002,41 +3007,41 @@
     "held": 0,
     "broke": 1,
     "chop": 3,
-    "miss": 8
+    "miss": 9
    },
    "CALL|\u2212": {
     "held": 1,
     "broke": 0,
     "chop": 1,
-    "miss": 10
+    "miss": 11
    },
    "POS|\u2212": {
     "held": 2,
     "broke": 0,
     "chop": 0,
-    "miss": 34
+    "miss": 37
    },
    "NEG|\u2212": {
     "held": 2,
     "broke": 6,
     "chop": 5,
-    "miss": 23
+    "miss": 26
    },
    "SD05|\u2212": {
-    "held": 5,
+    "held": 6,
     "broke": 4,
     "chop": 5,
-    "miss": 10
+    "miss": 11
    },
    "SD1|\u2212": {
     "held": 0,
-    "broke": 3,
+    "broke": 4,
     "chop": 6,
-    "miss": 15
+    "miss": 16
    },
    "EXP|\u2212": {
     "pinned": 0,
-    "not": 12
+    "not": 13
    },
    "FLIP|+": {
     "held": 0,
@@ -3136,47 +3141,47 @@
     "held": 0,
     "broke": 0,
     "chop": 0,
-    "miss": 11
+    "miss": 12
    },
    "PUT|\u2212": {
     "held": 1,
     "broke": 1,
     "chop": 1,
-    "miss": 4
+    "miss": 5
    },
    "CALL|\u2212": {
     "held": 3,
     "broke": 1,
     "chop": 0,
-    "miss": 3
+    "miss": 4
    },
    "POS|\u2212": {
-    "held": 0,
+    "held": 1,
     "broke": 0,
     "chop": 0,
-    "miss": 21
+    "miss": 23
    },
    "NEG|\u2212": {
     "held": 3,
     "broke": 1,
     "chop": 2,
-    "miss": 15
+    "miss": 18
    },
    "SD05|\u2212": {
     "held": 3,
     "broke": 1,
-    "chop": 4,
-    "miss": 6
+    "chop": 5,
+    "miss": 7
    },
    "SD1|\u2212": {
     "held": 1,
-    "broke": 0,
+    "broke": 1,
     "chop": 1,
-    "miss": 12
+    "miss": 13
    },
    "EXP|\u2212": {
     "pinned": 0,
-    "not": 3
+    "not": 4
    }
   },
   "ZN": {
@@ -3184,47 +3189,47 @@
     "held": 1,
     "broke": 0,
     "chop": 0,
-    "miss": 9
+    "miss": 10
    },
    "PUT|+": {
     "held": 3,
     "broke": 0,
     "chop": 2,
-    "miss": 5
+    "miss": 6
    },
    "CALL|+": {
     "held": 3,
     "broke": 1,
     "chop": 2,
-    "miss": 4
+    "miss": 5
    },
    "POS|+": {
-    "held": 5,
-    "broke": 3,
+    "held": 6,
+    "broke": 4,
     "chop": 2,
-    "miss": 20
+    "miss": 21
    },
    "NEG|+": {
     "held": 3,
     "broke": 1,
     "chop": 0,
-    "miss": 26
+    "miss": 29
    },
    "SD05|+": {
     "held": 4,
     "broke": 5,
-    "chop": 3,
-    "miss": 8
+    "chop": 4,
+    "miss": 9
    },
    "SD1|+": {
     "held": 4,
-    "broke": 0,
+    "broke": 1,
     "chop": 1,
-    "miss": 15
+    "miss": 16
    },
    "EXP|+": {
     "pinned": 1,
-    "not": 7
+    "not": 8
    },
    "FLIP|\u2212": {
     "held": 0,
@@ -3274,6 +3279,6 @@
    }
   }
  },
- "fail_day": "2026-11-23",
- "fails": 1
+ "last_ok": "2026-11-23",
+ "last_ok_at": "2026-11-23T06:42:43.622144+00:00"
 }
