@@ -374,6 +374,9 @@ def put_cache(cache, name, df, now):
 def save_cache(cache):
     if len(cache):
         cache.reset_index(drop=True).to_csv(CACHE, index=False)
+        print(f"[cache] saved {len(cache)} contracts for {sorted(cache['prod'].unique())}", flush=True)
+    else:
+        print("[cache] nothing to save", flush=True)
 
 def refresh(c):
     """Sunday job: save Friday's full contract list while Databento is quiet (warms Monday's run)."""
@@ -424,7 +427,10 @@ def run(c):
             # the contract list is the big request that times out → one quick try only
             df_ = guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=dend, _waits=[20, 40])
             dparts.append(df_)
-            cache = put_cache(cache, name, df_, now); save_cache(cache)     # save right away (survives the 10-min cap)
+            try:
+                cache = put_cache(cache, name, df_, now); save_cache(cache)     # save right away (survives the 10-min cap)
+            except Exception as e3:
+                print(f"[cache] {name}: could not save ({type(e3).__name__}: {e3}); columns {list(df_.columns)[:12]}", flush=True)
             continue
         except Exception as e_:
             print(f"{name}: fresh definitions failed ({e_})")
