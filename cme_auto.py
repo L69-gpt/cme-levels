@@ -54,6 +54,8 @@ def retry(fn, label="databento", waits=None):
         try:
             return fn()
         except Exception as e:
+            if isinstance(e, getattr(db, "BentoClientError", ())):
+                raise                                   # 4xx = bad request (e.g. expired code) → retrying won't help
             transient = isinstance(e, getattr(db, "BentoError", Exception)) or any(w in str(e) for w in ("prematurely", "504", "timed out", "Timeout", "Connection", "502", "503"))
             if i == len(waits) or not transient:
                 raise
@@ -411,6 +413,7 @@ def run(c):
     if end - day0 < pd.Timedelta(hours=2):
         day0 -= pd.Timedelta(days=1)
     # definitions per product (smaller requests = no gateway timeouts)
+    dend = min(end, day0 + pd.Timedelta(hours=2))   # definitions snapshot is at UTC midnight → small window = small request
     dparts, skipped, cached = [], [], []
     cache = load_cache()
     for name, p in PRODUCTS.items():
@@ -419,9 +422,9 @@ def run(c):
         par = [f"{a}.OPT" for a in prods.get(name, [])] + [f"{p['root']}.FUT"]
         try:
             # the contract list is the big request that times out → one quick try only
-            df_ = guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=end, _waits=[20, 40])
+            df_ = guarded(c, f"definitions {name}", schema="definition", symbols=par, stype_in="parent", start=day0, end=dend, _waits=[20, 40])
             dparts.append(df_)
-            cache = put_cache(cache, name, df_, now)
+            cache = put_cache(cache, name, df_, now); save_cache(cache)     # save right away (survives the 10-min cap)
             continue
         except Exception as e_:
             print(f"{name}: fresh definitions failed ({e_})")
@@ -435,12 +438,12 @@ def run(c):
         got = []
         for sym in par:
             try:
-                got.append(fetch(c, schema="definition", symbols=[sym], stype_in="parent", start=day0, end=end, _waits=[15, 30]))
+                got.append(fetch(c, schema="definition", symbols=[sym], stype_in="parent", start=day0, end=dend, _waits=[10]))
             except Exception as e2:
                 print(f"  {sym}: failed ({e2})")
         if got:
             dparts.extend(got)
-            cache = put_cache(cache, name, pd.concat(got), now)
+            cache = put_cache(cache, name, pd.concat(got), now); save_cache(cache)
         else:
             skipped.append(name)
             prods[name] = []          # no data for this market today → skip it, keep the others
